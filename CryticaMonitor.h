@@ -219,7 +219,7 @@ typedef struct
     //unsigned char probe_id[20];
     //unsigned char send_ip_addr[30];
     //unsigned char recv_ip_addr[30];
-    size_t      message_total_size; //4 bytes for the message total size : WRONG!!!! this is 8 bytes!
+    size_t      message_total_size; //4 bytes for the message total size : WRONG!!!! size_t is 8 bytes!
     char        license_key[SIZE_LICENSE_KEY]; //65 bytes for the License Key (64 + 1 null term)
     uint32_t    file_name_size; //4 bytes for the file_name size (variable msg size)
 //    char        file_name[PATH_MAX]; // 4096 bytes
@@ -425,7 +425,7 @@ int     alertDeviceWriteRecord(device_alert_record *alert_record);
 /************************************************
  * bool alertOnDevice()
  *  @param
- *          byte    *device_identifier
+ *          char    *identifier_string
  *          short   alert_type
  *
  *  @brief
@@ -438,7 +438,7 @@ int     alertDeviceWriteRecord(device_alert_record *alert_record);
  *
  *  @return true on success, false on failure
  ************************************************/
-bool    alertOnDevice (byte *device_identifier, short alert_type);
+bool    alertOnDevice (char *identifier_string, short alert_type);
 
 
 /************************************************
@@ -646,6 +646,56 @@ bool    cStandardWriteToDB(unsigned short deviceIndex);
  *          CS_DEVICE_NOT_FOUND     - if not, i.e., device is not assigned to this monitor
  ************************************************/
 long long deviceAssignedToMonitor(byte *device_identifier, byte *device_mac_address);
+
+/************************************************
+ * short deviceBadActorAdd(byte *device_identifier)
+ *  @param
+ *          char *device_identifier
+ *
+ *  @brief  Function to add a device in the device bad actor table
+ *
+ *  @author Kerry
+ *
+ *  @note   The monitor maintains a bad actor device_table in which each entry
+ *          contains the device identifier of those unauthorized devices that have attempted to connect
+ *          to the monitor.
+ *          In the event that the table is about to overflow, this function re-initializes the table and
+ *          starts again from position zero.
+ *
+ *  @return the size of the device bad actor device table
+ ************************************************/
+short deviceBadActorAdd(char *device_identifier);
+
+/************************************************
+ * short deviceBadActorFind()
+ *  @param
+ *          char *device_identifier
+ *
+ *  @brief  Function to find a device in the device bad actor table
+ *
+ *  @author Kerry
+ *
+ *  @note   The monitor maintains a bad actor device_table in which each entry
+ *          contains the device identifier of those unauthorized devices that have attempted to connect
+ *          to the monitor
+ *          This function returns the row number corresponding to a
+ *          specific device, identified by the device's unique device_id
+ *
+ * @return the row number (the device_index) of the found device or the code: CS_DEVICE_NOT_FOUND
+ ************************************************/
+short   deviceBadActorFind(char *device_identifier);
+
+/************************************************
+ * bool deviceBadActorTableInitialize()
+ *  @param  none
+ *
+ *  @brief  To initialize the device bad actor table
+ *
+ *  @author Kerry
+ *
+ * @return  true
+ ************************************************/
+bool deviceBadActorTableInitialize();
 
 /************************************************
  * short deviceFindByDeviceID()

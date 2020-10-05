@@ -60,12 +60,14 @@
 /**** MySQL DB Table/View Constants ************************/
 #define CS_SQL_ALERT_TABLE                  "alert_log"
 #define CS_SQL_ALERT_LOG_VIEW               "v_alert_log"
-#define CS_SQL_DEVICE_TABLE                 "v_device"
+#define CS_SQL_DEVICE_TABLE                 "device"
+#define CS_SQL_DEVICE_VIEW                  "v_device"
 #define CS_SQL_ELEMENT_NAMES_VIEW           "v_element_names"
 #define CS_SQL_MONITOR_VIEW                 "v_monitor"
 #define CS_SQL_MONITOR_DEVICE_VIEW          "v_monitor_device"
 #define CS_SQL_ELEMENT_ADDED_NAMES_TABLE    "element_added_names"
 #define CS_SQL_ELEMENT_ADDED_NAMES_VIEW     "element_added_names"
+#define CS_SQL_ALERT_PRUNE_STATEMENT        "delete from %s.%s where alert_sync != 0"
 #define CS_SQL_STANDARD_VIEW                "v_crytica_standard"
 #define CS_SQL_STANDARD_TABLE               "crytica_standard"
 
@@ -77,6 +79,7 @@ static char* DEFAULT_DATE       = "2001-02-03 04:05:06";
 #define DEFAULT_MAC_ADDRESS     "00.00.00.00.00.00"
 #define DEFAULT_MONITOR_ID      1984L
 #define DEFAULT_PORT_PREFIX     42
+#define UNKNOWN_DEVICE_ID       0L
 
 /************************************************
  * SUCCESS, WARNING, and ERROR Codes
@@ -87,7 +90,9 @@ static char* DEFAULT_DATE       = "2001-02-03 04:05:06";
 #define CS_DATA_NOT_AVAILABLE           "Data Not Available"
 
 #define CS_BAD_COMPARE                  -9021
-#define CS_DEVICE_NOT_FOUND             -1
+#define CS_DEVICE_NOT_FOUND             -201
+#define CS_DEVICE_BAD_ACTOR             -202
+#define CS_DEVICE_BAD_IDENTIFIER        -203
 #define CS_ERROR                        -2
 #define CS_ERROR_DB_QUERY               -2020
 #define CS_FATAL_ERROR                  -1
@@ -143,6 +148,7 @@ static char *cs_standard_types[] =
 #define CS_TABLE_OVERFLOW       -111
 #define PROBE_NEW               105
 #define CS_NULL                 '\0'
+#define CS_BAD_ACTOR_LIMIT      100
 #define SCAN_RECEIVED           120
 #define MESSAGE_TIMEOUT         1001
 #define CSL_MAX_MESSAGE_LENGTH  5012
@@ -183,7 +189,10 @@ static unsigned char MASK_MOD_CONTENTS  = 0x4;
 static unsigned char MASK_DEL_ELEMENT   = 0x8;
 static unsigned char MASK_MOD_ATTRIBS   = 0x10;
 
-
+/**** Bit-wise operators - for db_sync field in the Device Table ****/
+static unsigned char CS_SYNC_STANDARD   = 0x1;
+static unsigned char CS_SYNC_ALERT      = 0x2;
+static unsigned char CS_SYNC_CONFIG     = 0x4;
 
 /**** Message Related Defines *******************/
 #define ACCESSOR_ID_SIZE                64

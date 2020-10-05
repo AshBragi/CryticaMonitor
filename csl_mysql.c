@@ -295,7 +295,7 @@ csl_monitor_device_record *csl_ReturnMonitorDeviceRows(MYSQL *db_connection, MYS
     {
         return_monitor_devices[row_ctr].device_id = strtoll(row[0], NULL, BASE_TEN);
         strcpy(tmp_identifier, row[1]);
-        memset(return_monitor_devices[row_ctr].device_identifier, NULL_BINARY, SIZE_DEVICE_IDENTIFIER);
+        memset(return_monitor_devices[row_ctr].device_identifier, NULL_BINARY, SIZE_DEVICE_IDENTIFIER + 1);
         memcpy(return_monitor_devices[row_ctr].device_identifier, tmp_identifier, strlen(tmp_identifier));
         row_ctr++;
     }
@@ -343,6 +343,28 @@ char *csl_ReturnElementName(MYSQL *db_connection, MYSQL_RES *result)
         strcpy(element_name, row[0]);
     }
     return element_name;
+}
+
+int csl_alert_sync_and_prune(MYSQL* db_connection, char *view_name, unsigned long long device_id)
+{
+    // Set db_sync alert value in the device table //
+    char query [SIZE_CS_SQL_COMMAND];
+    memset (query, NULL_BINARY, SIZE_CS_SQL_COMMAND);
+    sprintf(query,"Update %s.%s Set db_sync = db_sync | %d where device_id = %llu",
+            CS_SQL_MONITOR_SCHEMA, CS_SQL_DEVICE_VIEW, CS_SYNC_ALERT, device_id);
+    int return_flag = csl_UpdateDB (db_connection, query);
+    if (return_flag != CS_SUCCESS)
+    {
+        return return_flag;
+    }
+
+    // Prune the alert log of all previously sync'd records //
+    memset (query, NULL_BINARY, SIZE_CS_SQL_COMMAND);
+    sprintf(query, CS_SQL_ALERT_PRUNE_STATEMENT, CS_SQL_MONITOR_SCHEMA, view_name);
+
+    return_flag = csl_UpdateDB (db_connection, query);
+
+    return return_flag;
 }
 
 #ifndef DEPRECATED

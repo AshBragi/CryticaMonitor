@@ -341,6 +341,8 @@ cs_standard_record *csl_ReturnStandardRow(MYSQL *db_connection, MYSQL_RES *resul
 
 char *csl_ReturnElementName(MYSQL *db_connection, MYSQL_RES *result);
 
+int csl_alert_sync_and_prune(MYSQL* db_connection, char *view_name, unsigned long long device_id);
+
 /************************************************
  * **********************************************
  * Deprecated MySQL Functions

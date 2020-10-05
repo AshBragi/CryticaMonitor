@@ -51,6 +51,19 @@ static status_quo_record G_status_quo_table[MAX_DEVICES][MAX_ELEMENTS];
 static device_record G_device_table[MAX_DEVICES];
 
 /************************************************
+ * Device Bad Actor Table
+ * ============
+ * The G_device_bad_actors has one record containing the device_identifier for each unauthorized
+ * device attempting to connect to the monitor
+ * This is necessary since a "bad actor" device could keep trying and trying, creating a denial of service attack,
+ * as the Monitor attempts to log all of the device's attempts. On the first attempt, an alert is logged and the
+ * device_identifier of the offending device is added into this table. After that, the connect attempt is ignored.
+ * No new alert is issued.
+ * **********************************************/
+static char G_device_bad_actors[CS_BAD_ACTOR_LIMIT] [SIZE_DEVICE_IDENTIFIER];
+static short G_device_bad_ctr;
+
+/************************************************
  * Zero MQ  & Message Globals
  * ===============
  * We need the ZMQ variables until we can uncouple Zero MQ completely from our main module
@@ -172,6 +185,13 @@ int main()
             monitorShutDown();
             return (CS_FATAL_ERROR);
         }
+
+        if (message_type == CS_DEVICE_UNKNOWN)
+        {
+ //           zsys_init(); // We need this here, otherwise zeroMQ gets stuck on the invalid device
+            continue;
+        }
+
         // Find the device_index for the device transmitting the message
         message_device_index = deviceFindByDeviceIdentifier(
               G_current_cs_message.message_header.from_address.device_identifier);
@@ -183,6 +203,7 @@ int main()
         }
 
         // Provide the zmessage with the probe id
+        // todo - we need to give the probe the appropriate piece of the probe_id
         G_current_zmessage.probe_id   = G_device_table[message_device_index].probe_id;
         
         // **** Primary Loop Switch - Switch statement is based upon the message type ****
@@ -224,8 +245,8 @@ int main()
 //                G_current_scan_device_index    = deviceFindByDeviceIdentifier(
 //                        G_current_cs_message.message_header.from_address.device_identifier);
                 G_current_scan_device_index = message_device_index;
-                printf("\t<%s> Scan of [%d] records received from device [%d]\n",
-                       __PRETTY_FUNCTION__, G_scan_table.scan_element_ctr, G_current_scan_device_index);
+//                printf("\t<%s> Scan of [%d] records received from device [%d]\n",
+//                       __PRETTY_FUNCTION__, G_scan_table.scan_element_ctr, G_current_scan_device_index);
                 good_run = scanEvaluate(G_current_scan_device_index);
                 if (good_run)
                 {
@@ -305,18 +326,26 @@ int alertDeviceWriteRecord(device_alert_record *alert_record)
     char        alert_data[SIZE_ALERT_DEVICE_DATA];
     char        *time_string    = csl_Time2String(alert_record->alert_date);
 
+    // First prune the alert log of all the already sync'd records //
+    return_value = csl_alert_sync_and_prune(G_db_connection, CS_SQL_ALERT_LOG_VIEW, UNKNOWN_DEVICE_ID);
+    if (return_value != CS_SUCCESS)
+    {
+        return return_value;
+    }
+
+    // Prep the alert "query" //
     sprintf(alert_data,"Sent From: [%s] [%s] - Sent To: [%s] [%s]",
             alert_record->device_from_ip_address, alert_record->device_from_info,
             alert_record->device_to_ip_address, alert_record->device_to_info);
 
     //   sprintf(mysql_insert, "Insert into cs_monitor.v_alert_log "
     sprintf(mysql_insert, "Insert into %s.%s "
-                          "(monitor_id, device_identifier, probe_id, alert_type, alert_data, alert_process_date)"
-                          "values (%llu, '%s', %f, %d, '%s', '%s')",
+                          "(monitor_id, device_identifier, probe_id, alert_type, alert_data, alert_process_date, alert_sync) "
+                          "values (%llu, '%s', %f, %d, '%s', '%s', 0)",
             CS_SQL_MONITOR_SCHEMA, CS_SQL_ALERT_LOG_VIEW,
             alert_record->monitor_id,
             alert_record->device_identifier,
-            csl_AssignProbeID(alert_record->monitor_id, 0),
+            csl_AssignProbeID(alert_record->monitor_id, MAX_DEVICES-2),
             alert_record->alert_type,
             alert_data,
             time_string);
@@ -329,7 +358,7 @@ int alertDeviceWriteRecord(device_alert_record *alert_record)
 /************************************************
  * bool alertOnDevice()
  *  @param
- *          byte    *device_identifier
+ *          char    *identifier_string
  *          short   alert_type
  *
  *  @brief
@@ -342,10 +371,14 @@ int alertDeviceWriteRecord(device_alert_record *alert_record)
  *
  *  @return true on success, false on failure
  ************************************************/
-bool alertOnDevice (byte *device_identifier, short alert_type)
+bool alertOnDevice (char *identifier_string, short alert_type)
 {
     bool return_flag        = true;
-    char *identifier_string = csl_Byte2String(device_identifier, SIZE_DEVICE_IDENTIFIER);
+    if (deviceBadActorFind(identifier_string) != CS_DEVICE_NOT_FOUND)
+    {
+        return true;
+    }
+    deviceBadActorAdd(identifier_string);
 
     // Build Basic Alert Message
     device_alert_record alert_record;
@@ -353,26 +386,29 @@ bool alertOnDevice (byte *device_identifier, short alert_type)
     alert_record.alert_date             = time(NULL);
     alert_record.monitor_id             = G_monitor_table.monitor_id;
     strcpy(alert_record.device_identifier, identifier_string);
-    free(identifier_string);
+    strcpy(alert_record.device_to_ip_address, G_monitor_table.comm_params.monitor_internal_ip_address);
+ //       perhaps it should be this ??   G_current_cs_message.message_header.to_address.device_ip_address);
+    strcpy(alert_record.device_to_info, G_monitor_table.comm_params.monitor_hostname);
 
     // Get device data from current_message
     if (memcmp(
             G_current_cs_message.message_header.from_address.device_identifier,
-            device_identifier, SIZE_DEVICE_IDENTIFIER) != 0)
+            identifier_string, SIZE_DEVICE_IDENTIFIER) != 0)
     {
         // Build "Bad Message" Alert
         strcpy(alert_record.device_from_ip_address, "**** Unknown: From IP Address ****");
         strcpy(alert_record.device_from_info, "**** Unknown: From Address Info ****");
-        strcpy(alert_record.device_to_ip_address, "**** Unknown: To IP Address ****");
-        strcpy(alert_record.device_to_info, "**** Unknown: To Address Info ****");
-    } else
+//        strcpy(alert_record.device_to_ip_address, "**** Unknown: To IP Address ****");
+//        strcpy(alert_record.device_to_info, "**** Unknown: To Address Info ****");
+    }
+    else
     {
         strcpy(alert_record.device_from_ip_address,
                G_current_cs_message.message_header.from_address.device_ip_address);
         strcpy(alert_record.device_from_info, G_current_cs_message.message_header.from_address.misc_info);
-        strcpy(alert_record.device_to_ip_address,
-               G_current_cs_message.message_header.to_address.device_ip_address);
-        strcpy(alert_record.device_to_info, G_current_cs_message.message_header.to_address.misc_info);
+//        strcpy(alert_record.device_to_ip_address,
+//               G_current_cs_message.message_header.to_address.device_ip_address);
+//        strcpy(alert_record.device_to_info, G_current_cs_message.message_header.to_address.misc_info);
     }
 
     if (alertDeviceWriteRecord(&alert_record) != CS_SUCCESS)
@@ -552,10 +588,19 @@ int alertScanWriteRecord (scan_alert_record *alert_record)
     memset(mysql_insert, NULL_BINARY, SIZE_CS_SQL_COMMAND);
     char *time_string   = csl_Time2String(alert_record->alert_date);
 
+    // First prune the alert log of all the already sync'd records //
+    return_value = csl_alert_sync_and_prune(G_db_connection, CS_SQL_ALERT_LOG_VIEW,
+                                        G_device_table[G_current_scan_device_index].device_id);
+    if (return_value != CS_SUCCESS)
+    {
+        return return_value;
+    }
+
     sprintf(mysql_insert, "Insert into %s.%s "
-            "(monitor_id, device_identifier, device_id, probe_id, alert_type, element_type, element_name, alert_process_date)"
+            "(monitor_id, device_identifier, device_id, probe_id, alert_type, element_type, "
+            "element_name, alert_process_date, alert_sync)"
             " values "
-            "(%llu, '%s', %llu, %f, %d, '%s', '%s', '%s')",
+            "(%llu, '%s', %llu, %f, %d, '%s', '%s', '%s', 0)",
             CS_SQL_MONITOR_SCHEMA, CS_SQL_ALERT_LOG_VIEW,
             alert_record->monitor_id,
             alert_record->device_identifier,
@@ -566,7 +611,7 @@ int alertScanWriteRecord (scan_alert_record *alert_record)
             alert_record->element_name,
             time_string);
 
-    printf("\t<%s> Alert Scan Write:\n\t%s\n", __PRETTY_FUNCTION__, mysql_insert);
+    printf("\t<%s> Alert Scan Write:\n\t\t%s\n", __PRETTY_FUNCTION__, mysql_insert);
 
     return_value = csl_UpdateDB(G_db_connection, mysql_insert);
     if (return_value != CS_SUCCESS)
@@ -790,6 +835,8 @@ bool    cStandardWriteToDB(unsigned short device_index)
     bool return_flag    = true;
 
     // **** First Clean out the previous CS Standard table **** //
+    // todo - Check to see whether or not the CS Standard Table has already been sync'd with the backend ledger
+    // todo - if not, do we really want to delete the table rows
     char sql_command [SIZE_CS_SQL_COMMAND];
     memset (sql_command, NULL_BINARY, SIZE_CS_SQL_COMMAND);
     sprintf(sql_command, "Delete from %s.%s "
@@ -846,7 +893,7 @@ bool    cStandardWriteToDB(unsigned short device_index)
         free (new_record.cs_element_name);
     }
 
-    // **** Reset the flag to ****
+    // **** Reset the monitor_device crytica_standard_date to "now" ****
     char *current_time   = csl_Time2String(time(NULL));
     memset (sql_command, NULL_BINARY, SIZE_CS_SQL_COMMAND);
     sprintf(sql_command, "Update %s.%s set crytica_standard_date = '%s' "
@@ -855,6 +902,19 @@ bool    cStandardWriteToDB(unsigned short device_index)
             current_time,
             G_monitor_table.monitor_id, G_device_table[device_index].device_id);
     free (current_time);
+    if (csl_UpdateDB(G_db_connection, sql_command) != CS_SUCCESS)
+    {
+        // todo - issue error message failed to update monitor-device date
+        return_flag = false;
+    }
+
+    // **** Set the device table db_sync field to indicate the need for a cs_standard sync ****
+    memset (sql_command, NULL_BINARY, SIZE_CS_SQL_COMMAND);
+    sprintf(sql_command, "Update %s.%s set db_sync = db_sync | %d "
+                         "where device_id = %llu",
+            CS_SQL_MONITOR_SCHEMA, CS_SQL_DEVICE_VIEW,
+            CS_SYNC_STANDARD,
+            G_device_table[device_index].device_id);
     if (csl_UpdateDB(G_db_connection, sql_command) != CS_SUCCESS)
     {
         // todo - issue error message failed to update monitor-device date
@@ -953,8 +1013,8 @@ int cStandardWriteRecord(cs_standard_record *new_record)
  ************************************************/
 long long deviceAssignedToMonitor(byte *device_identifier, byte *device_mac_address)
 {
-    long long device_id     = (long long) CS_DEVICE_NOT_FOUND;
-    MYSQL_RES *result       = NULL;
+    long long device_id = (long long) CS_DEVICE_NOT_FOUND;
+    MYSQL_RES *result = NULL;
     char mysql_query[SIZE_CS_SQL_COMMAND];
     char *identifier_string = csl_Byte2String(device_identifier, SIZE_DEVICE_IDENTIFIER);
 
@@ -963,30 +1023,129 @@ long long deviceAssignedToMonitor(byte *device_identifier, byte *device_mac_addr
             "where Device_Identifier = '%s' and Monitor_ID = %llu",
             CS_SQL_MONITOR_SCHEMA, CS_SQL_MONITOR_DEVICE_VIEW,
             identifier_string, G_monitor_table.monitor_id);
-    free (identifier_string);
+    free(identifier_string);
 
-    result = csl_QueryDB (G_db_connection, mysql_query);
+    result = csl_QueryDB(G_db_connection, mysql_query);
     if (result != NULL)
     {
         int return_row_ctr = mysql_num_rows(result);
-        if (return_row_ctr != 1)
+        switch (return_row_ctr)
         {
-            printf("\t<%s> ERROR, too many rows returned for query on [%s] [%llu]\n",
-                   __PRETTY_FUNCTION__, device_identifier, G_monitor_table.monitor_id);
-        }
-        else
-        {
-            csl_monitor_device_record *monitor_device_row = csl_ReturnMonitorDeviceRows(G_db_connection, result);
-            if (monitor_device_row != NULL)
-            {
-                device_id = (long long) monitor_device_row[0].device_id;
-            }
-            free(monitor_device_row);
-        }
+            case 0:
+                printf("\t<%s> ERROR, Device NOT Authorized to Connect [%s] [%llu]\n",
+                       __PRETTY_FUNCTION__, device_identifier, G_monitor_table.monitor_id);
+                device_id = (long long) CS_DEVICE_NOT_FOUND;
+                break;
+
+            case 1:
+                printf("\t<%s>Looking up device_id\n",
+                       __PRETTY_FUNCTION__);    // SHOULD NOT BE HERE: BUG IN COMPILER!!!!
+                csl_monitor_device_record *monitor_device_row = csl_ReturnMonitorDeviceRows(G_db_connection, result);
+                if (monitor_device_row != NULL)
+                {
+                    device_id = (long long) monitor_device_row[0].device_id;
+                } else
+                {
+                    printf("\t<%s> ERROR, NULL Row Return in query on [%s] [%llu]\n",
+                           __PRETTY_FUNCTION__, device_identifier, G_monitor_table.monitor_id);
+                    device_id = (long long) CS_DEVICE_NOT_FOUND;
+                }
+                free(monitor_device_row);
+                break;
+
+            default:
+                printf("\t<%s> ERROR, too many rows returned for query on [%s] [%llu]\n",
+                       __PRETTY_FUNCTION__, device_identifier, G_monitor_table.monitor_id);
+                device_id = (long long) CS_DEVICE_NOT_FOUND;
+                break;
+
+        } // End of Switch
     }
 
     csl_mysql_free_result(result);
     return device_id;
+}
+
+/************************************************
+ * short deviceBadActorAdd(byte *device_identifier)
+ *  @param
+ *          char *device_identifier
+ *
+ *  @brief  Function to add a device in the device bad actor table
+ *
+ *  @author Kerry
+ *
+ *  @note   The monitor maintains a bad actor device_table in which each entry
+ *          contains the device identifier of those unauthorized devices that have attempted to connect
+ *          to the monitor.
+ *          In the event that the table is about to overflow, this function re-initializes the table and
+ *          starts again from position zero.
+ *
+ *  @return the size of the device bad actor device table
+ ************************************************/
+short deviceBadActorAdd(char *device_identifier)
+{
+    if (G_device_bad_ctr >= CS_BAD_ACTOR_LIMIT - 1)
+    {
+        deviceBadActorTableInitialize();
+    }
+    memset(G_device_bad_actors[G_device_bad_ctr], NULL_BINARY, SIZE_DEVICE_IDENTIFIER);
+    short cpyBytes = (short) strlen(device_identifier);
+    memcpy(G_device_bad_actors[G_device_bad_ctr], device_identifier, cpyBytes);
+//    strcpy(G_device_bad_actors[G_device_bad_ctr], device_identifier);
+//    char *displayString = calloc(SIZE_DEVICE_IDENTIFIER+1, sizeof(char));
+//    sprintf(displayString,"%s",G_device_bad_actors[G_device_bad_ctr]);
+    G_device_bad_ctr++;
+    return G_device_bad_ctr;
+}
+
+/************************************************
+ * short deviceBadActorFind()
+ *  @param
+ *          char *device_identifier
+ *
+ *  @brief  Function to find a device in the device bad actor table
+ *
+ *  @author Kerry
+ *
+ *  @note   The monitor maintains a bad actor device_table in which each entry
+ *          contains the device identifier of those unauthorized devices that have attempted to connect
+ *          to the monitor
+ *          This function returns the row number corresponding to a
+ *          specific device, identified by the device's unique device_id
+ *
+ *  @return the row number (the device_index) of the found device or the code: CS_DEVICE_NOT_FOUND
+ ************************************************/
+short   deviceBadActorFind(char *device_identifier)
+{
+    for (short i = 0; i < G_device_bad_ctr; i++)
+    {
+        if (memcmp(G_device_bad_actors[i], device_identifier, SIZE_DEVICE_IDENTIFIER) == 0)
+        {
+            return i;
+        }
+    }
+    return CS_DEVICE_NOT_FOUND;
+}
+
+/************************************************
+ * bool deviceBadActorTableInitialize()
+ *  @param  none
+ *
+ *  @brief  To initialize the device bad actor table
+ *
+ *  @author Kerry
+ *
+ *  @return  true
+ ************************************************/
+bool deviceBadActorTableInitialize()
+{
+    for (unsigned short i = 0; i < CS_BAD_ACTOR_LIMIT; i++)
+    {
+        memset(G_device_bad_actors[i], NULL_BINARY, SIZE_DEVICE_IDENTIFIER);
+    }
+    G_device_bad_ctr = 0;
+    return true;
 }
 
 /************************************************
@@ -1043,6 +1202,14 @@ short deviceFindByDeviceID(unsigned long long device_id)
 short deviceFindByDeviceIdentifier(byte device_identifier[])
 {
     short device_index = CS_DEVICE_NOT_FOUND;
+    // Check for bad actor first //
+    char device_identifier_string[SIZE_DEVICE_IDENTIFIER+1];
+    memset(device_identifier_string, NULL_BINARY, SIZE_DEVICE_IDENTIFIER+1);
+    memcpy(device_identifier_string, device_identifier, SIZE_DEVICE_IDENTIFIER);
+    if (deviceBadActorFind(device_identifier_string) != CS_DEVICE_NOT_FOUND)
+    {
+        return CS_DEVICE_BAD_ACTOR;
+    }
 
     for (short i = 0; i < G_monitor_table.device_ctr; i++)
     {
@@ -1057,7 +1224,8 @@ short deviceFindByDeviceIdentifier(byte device_identifier[])
     char display_field[SIZE_DEVICE_IDENTIFIER + 1];
     memset(display_field, NULL_BINARY, SIZE_DEVICE_IDENTIFIER+1);
     memcpy(display_field, device_identifier, SIZE_DEVICE_IDENTIFIER);
-    printf("\t<%s> **** ERROR: Could Not Find device_identifier[%s] in the device_table\n",
+    printf("\t<%s> **** WARNING: Could Not Find device_identifier[%s] in the device_table\n"
+           "\t\tWill Check the DB for newly assigned device\n",
            __PRETTY_FUNCTION__, display_field);
 
     return CS_DEVICE_NOT_FOUND;
@@ -1097,7 +1265,6 @@ short deviceFindByProbeID(double probe_id)
            __PRETTY_FUNCTION__, probe_id);
     return CS_DEVICE_NOT_FOUND;
 }
-
 
 /************************************************
  * short    deviceRegisterNew()
@@ -1222,13 +1389,17 @@ int     messageCheckOrigin()
     return_value = deviceFindByDeviceIdentifier(device_identifier);
     if (return_value < 0)        // i.e., the device was not found in the G_device_table
     {
+        if (return_value == CS_DEVICE_BAD_ACTOR)
+        {
+            return return_value;
+        }
         // Determine whether this is a new, legitimate device for this monitor, previously not registered
         long long device_id = deviceAssignedToMonitor(device_identifier, device_mac_address);
 //
         if (device_id != (long long) CS_DEVICE_NOT_FOUND)
         {
             // Authorized Device - Register it
-            return_value                = deviceRegisterNew(device_identifier, device_id, device_mac_address);
+            return_value                  = deviceRegisterNew(device_identifier, device_id, device_mac_address);
             G_current_zmessage.probe_id   = return_value;
 //            G_current_zmessage.probe_id   = csl_AssignProbeID(G_monitor_table.monitor_id, return_value);
 //            G_current_zmessage.probe_id   = G_monitor_table.monitor_id + device_id; // todo - this is also in deviceRegisterNew?
@@ -1238,7 +1409,10 @@ int     messageCheckOrigin()
         {
             // Unauthorized Device - Issue an Alert
             // todo - Issue An Alert
-            alertOnDevice (device_identifier, ALERT_DEVICE_UNKNOWN);
+            char device_identifier_string[SIZE_DEVICE_IDENTIFIER+1];
+            memset(device_identifier_string, NULL_BINARY, SIZE_DEVICE_IDENTIFIER + 1);
+            memcpy(device_identifier_string, device_identifier, SIZE_DEVICE_IDENTIFIER);
+            alertOnDevice (device_identifier_string, ALERT_DEVICE_UNKNOWN);
             return_value = CS_DEVICE_UNKNOWN;
         }
     }
@@ -1490,8 +1664,9 @@ bool monitorInitialize()
 
     /********************************************
      * Initialize the Monitor's important tables
-     *      The Status Quo Table    - Keeps track of the latest scan data for each device
-     *      The Device Table        - Keeps track of the devices the monitor is monitoring
+     *      The Status Quo Table            - Keeps track of the latest scan data for each device
+     *      The Device Table                - Keeps track of the devices the monitor is monitoring
+     *      The Device "bad actor" Table    - Keeps track of the unauthorized devices attempting to connect
      ********************************************/
     // **** Initialize G_status_quo_table to all 0s - indicating no current devices and scans ****
     for (int i = 0; i < MAX_DEVICES; i++)
@@ -1523,6 +1698,8 @@ bool monitorInitialize()
         G_device_table[i].device_index          = i;
     }
 //    printf("\t<%s> we are true up to here ... and then?\n",__PRETTY_FUNCTION__);
+
+    deviceBadActorTableInitialize();
 
     /********************************************
      * Connect to the MySQL Database
@@ -2231,8 +2408,8 @@ short   statusQuoTableSearch(short device_index)
                     G_status_quo_table[device_index][sq_index].alert_code ^ MASK_COMPARED;
         }
     }
-    printf("\t<%s> Finished scan of [%d] for device_index[%d]\n",
-           __PRETTY_FUNCTION__, G_scan_table.scan_element_ctr, G_scan_table.device_index);
+//    printf("\t<%s> Finished scan of [%d] for device_index[%d]\n",
+//           __PRETTY_FUNCTION__, G_scan_table.scan_element_ctr, G_scan_table.device_index);
     if (scanTableInitialize(-1) != 0)
     {
         printf("\t<%s> Failed to initial scan table for device[%d]",

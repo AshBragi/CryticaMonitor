@@ -87,7 +87,8 @@ short csl_zmessage_get(csl_zmessage *current_zmessage, monitor_comms_t *comms, c
 //        printf("got response!\n");
         size_t msg_size = CSL_MAX_MESSAGE_LENGTH;       //was sizeof(csl_message);
 
-        // Important note: The "b" here signals to czmq that we are expecting binary data. And it won't try to append any null chars
+        // Important note: The "b" here signals to czmq that we are expecting binary data.
+        // And it won't try to append any null chars
         // or try and treat it like a c-string
         int resp = zsock_recv(which, "b", &data, &msg_size);
 
@@ -109,21 +110,26 @@ short csl_zmessage_get(csl_zmessage *current_zmessage, monitor_comms_t *comms, c
         if (device_index == CS_DEVICE_UNKNOWN)
         {
             // If bad provenance, we issue an error code in the messageCheckOrigin() function and then continue the while loop
+#ifndef DEPRECATED
             // Unless it is a bad message, in which there is no device_identifier. In that case we log an error and continue
-            char error_print[SIZE_DEVICE_IDENTIFIER+1];
+            char *error_print = calloc(SIZE_DEVICE_IDENTIFIER+1, sizeof(char));
             memcpy(error_print, cs_message->message_header.from_address.device_identifier, SIZE_DEVICE_IDENTIFIER);
             error_print[SIZE_DEVICE_IDENTIFIER] = END_OF_STRING;
-            if (strlen(error_print) < SIZE_DEVICE_IDENTIFIER)
-            {
-                printf("\n\t<%s> **** ERROR: No Device Identifier Detected in the message ****\n",
-                       __PRETTY_FUNCTION__);    // todo - fix this so as not to abort
-                break;
-            }
+
             printf("\n\t<%s>**** ERROR ****\n", __PRETTY_FUNCTION__ );
             printf("\tUnknown Device [%s][%lu] Attempted to Connect to Monitor\n\n",error_print,
                    strlen(error_print));
             // todo - We need to log this error in the database
-            continue;
+            if (alertOnDevice (error_print, CS_DEVICE_NOT_FOUND) != true)
+            {
+                printf("\n\t<%s>**** ERROR ****\n", __PRETTY_FUNCTION__ );
+                printf("\tFailed to log Device Not Found Error for Device Identifier [%s]\n\n", error_print);
+            }
+#endif
+//            continue;
+            // The following is a kluge - We need to respond to the bad device so that the monitor can continue
+            csl_AcknowledgeHandshake(current_zmessage, comms);
+            return CS_DEVICE_UNKNOWN;
         }
         // add the device index to the current cs_message
         cs_message->message_body.message_scan.device_index = device_index;
@@ -184,9 +190,10 @@ short csl_zmessage_get(csl_zmessage *current_zmessage, monitor_comms_t *comms, c
                         char *time_string = csl_Time2String(start_time);
                         G_current_device_index = (short) cs_message->message_body.message_scan.device_index;
 
-                        zsys_info("\t<%s> Scan started at %s for probe_id: %u, hostname: %s, ip: %s",
+                        zsys_info("\t<%s> Scan Started  at %s for probe_id: %.4f, hostname: %s, ip: %s",
                                   __PRETTY_FUNCTION__, time_string,
-                                  current_zmessage->probe_id, current_zmessage->hostname, current_zmessage->probe_ip);
+                                  cs_message->message_body.message_scan.probe_id,
+                                  current_zmessage->hostname, current_zmessage->probe_ip);
                         free(time_string);
                         /**********
                         zsys_info("Scan started at %ld for probe_id: %u, hostname: %s, ip: %s", start_time,
@@ -227,8 +234,14 @@ short csl_zmessage_get(csl_zmessage *current_zmessage, monitor_comms_t *comms, c
                         {
                             break;      // We don't want to end a scan before one is started
                         }
-                        printf("\t<%s> Finished Scan of [%d] records for device [%d]\n",
-                               __PRETTY_FUNCTION__, G_current_scan_ctr, G_current_device_index);
+                        start_time = time(NULL);
+                        time_string = csl_Time2String(start_time);
+                        zsys_info("\t<%s> Scan Finished at %s for probe_id: %.4f, hostname: %s, ip: %s\n",
+                                  __PRETTY_FUNCTION__, time_string,
+                                  cs_message->message_body.message_scan.probe_id,
+                                  current_zmessage->hostname, current_zmessage->probe_ip);
+//                        printf("\t<%s> Finished Scan of [%d] records for device [%d]\n",
+//                               __PRETTY_FUNCTION__, G_current_scan_ctr, G_current_device_index);
                         G_scan_in_process = false;
                         G_current_device_index = -1;
                         return SCAN_RECEIVED;
