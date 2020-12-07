@@ -21,11 +21,11 @@
 #define DB_HOST                 "127.0.0.1"
 #define DB_SERVER               "127.0.0.1"
 *************************************************/
-#define DB_PORT                 3306
+//#define DB_PORT                 3306
 //#define DB_HOST                 "75.140.40.244"
 //#define DB_SERVER               "75.140.40.244"
-#define DB_USER                 "crytica"
-#define DB_USER_PWD             "crytica123!"
+#define DB_USER                   "crytica"
+#define DB_USER_PWD               "crytica123!"
 //#define DB_NAME                 "cs_monitor"
 
 #define ACT_AUDIT_LOG           0

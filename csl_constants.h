@@ -53,10 +53,13 @@
 #define FILE_MAC_ADDRESS                "myMACaddress"
 #define FILE_MONITOR_EXTERNAL_CONFIG    "External_Config"
 #define FILE_MONITOR_INTERNAL_CONFIG    "Internal_Config"
+#define DB_SYNC_INVOKE                  "/usr/crytica/db_sync /usr/crytica/cfgfile-production.txt > /home/kerry/db_sync.log @"
 
 /**** MySQL DB Access Constants ************************/
-#define CS_SQL_DEFAULT_GROUP     "CryticaMonitor"
-#define CS_SQL_MONITOR_SCHEMA    "cs_monitor"
+#define CS_SQL_DEFAULT_GROUP            "CryticaMonitor"
+#define CS_SQL_MONITOR_SCHEMA           "cs_monitor"
+#define CS_SQL_LOCAL_DB                 "localhost"
+#define CS_SQL_DB_PORT                  3306
 /**** MySQL DB Table/View Constants ************************/
 #define CS_SQL_ALERT_TABLE                  "alert_log"
 #define CS_SQL_ALERT_LOG_VIEW               "v_alert_log"
@@ -93,8 +96,11 @@ static char* DEFAULT_DATE       = "2001-02-03 04:05:06";
 #define CS_DEVICE_NOT_FOUND             -201
 #define CS_DEVICE_BAD_ACTOR             -202
 #define CS_DEVICE_BAD_IDENTIFIER        -203
+#define CS_ERROR_DB_CONNECTION          -2001
 #define CS_ERROR                        -2
 #define CS_ERROR_DB_QUERY               -2020
+#define CS_ERROR_DB_UPDATE              -2030
+#define CS_CORRUPTED_DB                 -2099
 #define CS_FATAL_ERROR                  -1
 
 
@@ -219,7 +225,7 @@ static unsigned char CS_SYNC_CONFIG     = 0x4;
 #define PROBE_TERMINATE                 203
 #define PROBE_HEARTBEAT                 204
 #define PROBE_TIMEOUT                   208
-#define PROBE_INVALID_LICENSE           600
+#define PROBE_CONNECTION_DENIED         600
 
 /**** Scan Related Defines **********************/
 #define SCAN_RECORD_NUMBER_OF_FIELDS    10
@@ -235,6 +241,7 @@ static unsigned char CS_SYNC_CONFIG     = 0x4;
 #define SCAN_ORDINAL_SCAN_DATE          9
 
 #define SIZE_ALERT_DEVICE_DATA          256     //todo - this is slightly but needs to be flexible
+#define SIZE_CONFIG_QUERY               256
 #define SIZE_DB_LICENSE_KEY             65
 #define SIZE_DEVICE_IDENTIFIER          64      // For Version 1, this is identical to SIZE_MAC_ADDRESS - not necessarily forever
 #define SIZE_DEVICE_MISC_INFO           64

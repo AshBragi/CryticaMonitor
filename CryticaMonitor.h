@@ -285,6 +285,7 @@ typedef struct
     unsigned long long  monitor_id;         // Value obtained from the monitor table in the config database
     short               device_ctr;         // The number of devices currently being monitored
     short               max_devices;        // Maximum number of devices this monitor can support (later feature)
+    short               monitor_sync;       // Flag indicating whether the monitor needs a config update
     monitor_comm_params comm_params;        // The information the monitor needs to communicate via ZeroMQ
 
 } monitor_info_table;
@@ -353,6 +354,7 @@ typedef struct
     unsigned long long  monitor_id;
     char                monitor_name[SIZE_HOST_NAME];
     byte                monitor_identifier[SIZE_DEVICE_IDENTIFIER];
+    unsigned short      monitor_sync;
 } csl_monitor_record;
 
 /************************************************
@@ -874,12 +876,16 @@ int     messageUnknownProcess(int message_type, short device_id);
 
 
 /************************************************
- *      Monitor Start-up and Shutdown Functions
- *      =======================================
+ *      Monitor Start-up, Config and Shutdown Functions
+ *      ===============================================
  ************************************************/
 
+int     monitorConfigDBQuery (bool db_sync_just_launched);
+
+int monitorConfigUpdate();
+
 /************************************************
- * bool monitorInitialize()
+ * int monitorInitialize()
  *  @param  None
  *
  *  @brief  When the monitor first launches, there are many start-up tasks
@@ -899,9 +905,9 @@ int     messageUnknownProcess(int message_type, short device_id);
  *                  - Device Table
  *                  - Status Quo Table
  *
- *  @return true on success, false on failure
+ *  @return CS_SUCCESS or error code
  ************************************************/
-bool    monitorInitialize();
+int    monitorInitialize();
 
 /************************************************
  * bool monitorShutdown()

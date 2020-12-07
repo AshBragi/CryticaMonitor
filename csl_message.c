@@ -10,14 +10,17 @@ static bool   G_scan_in_process;
 static short  G_current_device_index;
 static short  G_current_scan_ctr;
 /************************************************
- * monitor_comm_params *comm_params_initialize()
- *  @param returnStruct
- *  @param broadcaster_port
- *  @param data_pipeline_port
- *  @param scan_port
+ * int monitor_comm_params *comm_params_initialize()
+ *  @params
+ *          monitor_comm_params *returnStruct
+ *          unsigned short      broadcaster_port
+ *          unsigned short      data_pipeline_port
+ *          unsigned short      scan_port
  *
+ *  @brief: This initializes the communication parameters needed by ZeroMQ. These include
+ *          the communication ports and the names of the local files required
  *
- *  @return
+ *  @return CS_SUCCESS
  ************************************************/
 //monitor_comm_params *comm_params_initialize(monitor_comm_params *returnStruct,
 int comm_params_initialize(monitor_comm_params *returnStruct,
@@ -25,13 +28,12 @@ int comm_params_initialize(monitor_comm_params *returnStruct,
                                             unsigned short data_pipeline_port,
                                             unsigned short scan_port)
 {
-    sprintf(returnStruct->monitor_hostname,"%s", "Stub Hostname");
-    sprintf(returnStruct->monitor_public_key, "%s", "Stub Public Key");
+    sprintf(returnStruct->monitor_hostname,"%s", DEFAULT_HOST_NAME);
+    sprintf(returnStruct->public_cert_file_name,"%s", DEFAULT_HOST_NAME);
     sprintf(returnStruct->broadcasting_address,"%d", broadcaster_port);
     sprintf(returnStruct->responder_address,"%d", data_pipeline_port);
     sprintf(returnStruct->data_pipeline_address,"%d", data_pipeline_port);
     sprintf(returnStruct->scan_address,"%d", scan_port);
-    sprintf(returnStruct->public_cert_file_name,"%s", "Stub Pub Cert File Name");
 
     G_scan_in_process     = false;
     G_current_device_index = -1;
@@ -41,7 +43,31 @@ int comm_params_initialize(monitor_comm_params *returnStruct,
 }
 
 /************************************************
+ *  short csl_zmessage_get()
+ *  @params
+ *          csl_zmessage            *current_zmessage
+ *          monitor_comms_t         *comms
+ *          csl_complete_message    *cs_message
  *
+ *  @brief  This is the main messaging function. It runs in a loop until there is a "return condition". Each
+ *          loop queries the ZeroMQ functions and returns either with a new message or not. If not, it continues
+ *          to loop until a message is received. When a message is received, that message is processed.
+ *
+ *          There are two "message states"
+ *              Scan Processing
+ *              Non-Scan Processing
+ *
+ *          During Non-Scan Processing the possible message types are:
+ *              Message from an authorized device:  log an alert and then ignore all further communications for the device
+ *              PROBE_HANDSHAKE:                    return the handshake message to the calling routine
+ *              PROBE_HEARTBEAT:                    return the heartbeat message to the calling routine
+ *          During the Scan Processing the possible message types are:
+ *              PROBE_START_SCAN
+ *
+ *
+ *  @note   This is the main messaging function. It runs in a loop until there is a "return condition"
+ *          Unlike most subroutines, and certainly in violation of "one entry point - one exit point" for
+ *          subroutines, csl_zmessage_get() "returns" from a number of different locations.
  *
  *
  ***********************************************/
@@ -60,7 +86,6 @@ short csl_zmessage_get(csl_zmessage *current_zmessage, monitor_comms_t *comms, c
 //    int debug_ctr   = 0;
     while (! zsys_interrupted)
     {
-//        byte *data = calloc(CSL_MAX_MESSAGE_LENGTH, sizeof(char));
         byte *data;     // **** This is INTENTIONALLY NOT initialized. If we do, it causes a memory leak **** //
 
         memset(current_zmessage, 0, sizeof(csl_zmessage));       // todo check to see if we want a null character here
@@ -84,7 +109,6 @@ short csl_zmessage_get(csl_zmessage *current_zmessage, monitor_comms_t *comms, c
                 continue;
             }
         }
-//        printf("got response!\n");
         size_t msg_size = CSL_MAX_MESSAGE_LENGTH;       //was sizeof(csl_message);
 
         // Important note: The "b" here signals to czmq that we are expecting binary data.
@@ -110,23 +134,7 @@ short csl_zmessage_get(csl_zmessage *current_zmessage, monitor_comms_t *comms, c
         if (device_index == CS_DEVICE_UNKNOWN)
         {
             // If bad provenance, we issue an error code in the messageCheckOrigin() function and then continue the while loop
-#ifndef DEPRECATED
-            // Unless it is a bad message, in which there is no device_identifier. In that case we log an error and continue
-            char *error_print = calloc(SIZE_DEVICE_IDENTIFIER+1, sizeof(char));
-            memcpy(error_print, cs_message->message_header.from_address.device_identifier, SIZE_DEVICE_IDENTIFIER);
-            error_print[SIZE_DEVICE_IDENTIFIER] = END_OF_STRING;
 
-            printf("\n\t<%s>**** ERROR ****\n", __PRETTY_FUNCTION__ );
-            printf("\tUnknown Device [%s][%lu] Attempted to Connect to Monitor\n\n",error_print,
-                   strlen(error_print));
-            // todo - We need to log this error in the database
-            if (alertOnDevice (error_print, CS_DEVICE_NOT_FOUND) != true)
-            {
-                printf("\n\t<%s>**** ERROR ****\n", __PRETTY_FUNCTION__ );
-                printf("\tFailed to log Device Not Found Error for Device Identifier [%s]\n\n", error_print);
-            }
-#endif
-//            continue;
             // The following is a kluge - We need to respond to the bad device so that the monitor can continue
             csl_AcknowledgeHandshake(current_zmessage, comms);
             return CS_DEVICE_UNKNOWN;
@@ -258,7 +266,7 @@ short csl_zmessage_get(csl_zmessage *current_zmessage, monitor_comms_t *comms, c
         zsys_debug("Bandwidth usage: ~%u (KB) or ~%u (MB)", msg_bandwidth_bytes / 1000, msg_bandwidth_bytes / 1000000);
 #endif
     }   // end while
-    printf("\t<%s> We should NEVER get here!\n", __PRETTY_FUNCTION__ );
+    printf("\n\t<%s> We should NEVER get here!\n", __PRETTY_FUNCTION__ );
     return CS_FATAL_ERROR;          // We should NEVER get here
 }
 
@@ -1018,8 +1026,8 @@ char *csl_get_probe_event_name(int probe_event_index)
             strcpy(return_string, "Heartbeat");
             break;
 
-        case PROBE_INVALID_LICENSE:
-            strcpy(return_string, "Invalid License");
+        case PROBE_CONNECTION_DENIED:
+            strcpy(return_string, "Probe Connection Denied");
             break;
 
         default:

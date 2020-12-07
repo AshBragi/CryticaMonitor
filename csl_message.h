@@ -49,6 +49,7 @@
 // Refer to ZeroMQ documentation about its use of high water marks to prevent overflowing sockets
 #define RECEIVE_HIGH_WATER_MARK     10000
 #define LICENSE_KEY_LENGTH          65
+#define DEFAULT_HOST_NAME           "DefaultHostName"
 
 /************************************************
  * struct Definitions

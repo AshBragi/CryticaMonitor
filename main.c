@@ -99,6 +99,8 @@ MYSQL                          *G_db_connection;
 static int                     G_error_status;
 static short                   G_current_scan_device_index;
 
+static pid_t                   G_pid_db_sync;
+
 /************************************************
  * Interrupt Stop to "gracefully" exit
  * Not sure we need it ... // todo - research this
@@ -136,7 +138,7 @@ int main()
     // Initialize CZMQ zsys layer ... Must be called from "main"
     zsys_init();
 
-    if (monitorInitialize() != true)
+    if (monitorInitialize() != CS_SUCCESS)
     {
         printf("\t<%s> **** ERROR: Monitor Failed to Initialize ****\n", __PRETTY_FUNCTION__);
         printf("\t\t=> Run Aborted! <=\n\n");
@@ -170,11 +172,32 @@ int main()
     short next_scan_index       = -1;
     short message_device_index  = -1;
 
+    // Initialize the config update query fields //
+    static char config_query [SIZE_CONFIG_QUERY];
+    memset(config_query, NULL_BINARY, SIZE_CONFIG_QUERY);
+    sprintf(config_query,"Select monitor_sync from %s.%s",
+            CS_SQL_MONITOR_SCHEMA, CS_SQL_MONITOR_VIEW);
+    static int config_update_status;
+    static bool monitor_sync_flag = false;
+
     /********************************************
      * This is the start of the main "while" loop
      ********************************************/
     while (good_run == true)
     {
+        // **** Initialize MySQL Query result **** //
+ //       MYSQL_RES *result      = NULL;
+
+        // **** Check for configuration update **** //
+        config_update_status = monitorConfigDBQuery (monitor_sync_flag);
+        if (config_update_status != CS_SUCCESS)
+        {
+            printf("\t<%s> Fatal ERROR: Failed to access the Config Table\n",
+                   __PRETTY_FUNCTION__);
+            monitorShutDown();
+            return (CS_FATAL_ERROR);
+        }
+
         // **** Check for next message from the message queue and return its type **** //
         short message_type  = csl_zmessage_get(&G_current_zmessage,
                                                G_zmq_comms_t,
@@ -1032,7 +1055,7 @@ long long deviceAssignedToMonitor(byte *device_identifier, byte *device_mac_addr
         switch (return_row_ctr)
         {
             case 0:
-                printf("\t<%s> ERROR, Device NOT Authorized to Connect [%s] [%llu]\n",
+                printf("\t<%s> **** ERROR: Device [%s] NOT Authorized to Connect to Monitor [%llu]\n",
                        __PRETTY_FUNCTION__, device_identifier, G_monitor_table.monitor_id);
                 device_id = (long long) CS_DEVICE_NOT_FOUND;
                 break;
@@ -1046,7 +1069,7 @@ long long deviceAssignedToMonitor(byte *device_identifier, byte *device_mac_addr
                     device_id = (long long) monitor_device_row[0].device_id;
                 } else
                 {
-                    printf("\t<%s> ERROR, NULL Row Return in query on [%s] [%llu]\n",
+                    printf("\t<%s> **** ERROR: NULL Row Return in query on [%s] [%llu]\n",
                            __PRETTY_FUNCTION__, device_identifier, G_monitor_table.monitor_id);
                     device_id = (long long) CS_DEVICE_NOT_FOUND;
                 }
@@ -1054,7 +1077,7 @@ long long deviceAssignedToMonitor(byte *device_identifier, byte *device_mac_addr
                 break;
 
             default:
-                printf("\t<%s> ERROR, too many rows returned for query on [%s] [%llu]\n",
+                printf("\t<%s> **** ERROR: too many rows returned for query on [%s] [%llu]\n",
                        __PRETTY_FUNCTION__, device_identifier, G_monitor_table.monitor_id);
                 device_id = (long long) CS_DEVICE_NOT_FOUND;
                 break;
@@ -1504,12 +1527,247 @@ int     messageUnknownProcess(int message_type, short device_id)
 
 
 /************************************************
- *      Monitor Start-up and Shutdown Functions
- *      =======================================
+ *      Monitor Start-up, Config and Shutdown Functions
+ *      ===============================================
  ************************************************/
 
+
 /************************************************
- * bool monitorInitialize()
+ * int     monitorConfigDBQuery
+ *
+ *  @param  db_sync_just_launched   -  indicates whether db_sync has just been launched and we need to wait for it
+ *                                     to start communicating
+ *
+ *  @brief  Query the localhost DB to see if new configuration parameters have been downloaded
+ *          from the Config Ledger
+ *
+ *  @author Kerry
+ *
+ *  @note   The logic is:
+ *
+ *
+ *  @return true on success, false on failure
+ ************************************************/
+
+int     monitorConfigDBQuery (bool db_sync_just_launched)
+{
+
+    int         return_flag = CS_SUCCESS;
+    MYSQL_RES   *result     = NULL;
+    char mysql_query[SIZE_CS_SQL_COMMAND];
+
+    // **** Set up the Query to read the Config View in the localhost DB **** //
+    memset(mysql_query, NULL_BINARY, SIZE_CS_SQL_COMMAND);
+    sprintf(mysql_query,
+            "Select Monitor_ID, Monitor_Name, Monitor_Identifier, Monitor_Sync from %s.%s "
+            "where Monitor_Identifier = '%s'",
+            CS_SQL_MONITOR_SCHEMA, CS_SQL_MONITOR_VIEW,
+            G_monitor_table.comm_params.monitor_mac_address);
+
+    // **** Read the Config View **** //
+    // **** Loop on the read if there is no response AND if the db_sync program has just been invoked **** //
+    bool repeat_flag = false;
+    if (db_sync_just_launched == true)
+    {
+        repeat_flag = true;
+    }
+    do
+    {
+        // **** Query the DB and evaluate the "result" **** //
+        result = csl_QueryDB (G_db_connection, mysql_query);
+        if (result != NULL)
+        {
+            unsigned int returned_rows = mysql_num_rows(result);
+            switch (returned_rows)
+            {
+                case 0:
+                    // No rows found in the Config View for this monitor in the local DB
+                    if (db_sync_just_launched == true)
+                    {
+                        // Continue to cycle and wait for those rows to be written
+                        printf("\t<%s> Error: no rows found in the database for monitor_identifier [%s]\n",
+                               __PRETTY_FUNCTION__, G_monitor_table.comm_params.monitor_mac_address);
+                        printf("\t<%s> Waiting on db_sync ...\n", __PRETTY_FUNCTION__);
+                    }
+                    else
+                    {
+                        // If this happens during a run already launched we have a corrupted DB!
+                        printf("**** ERROR ****\n");
+                        printf("     Monitor: [%s] [%s] is not configured in the database\n\n",
+                           G_monitor_table.comm_params.monitor_mac_address,
+                           G_monitor_table.comm_params.monitor_hostname);
+                        return_flag = CS_CORRUPTED_DB;
+                        repeat_flag = false;
+                    }
+                    break;
+
+                case 1:
+                    // **** We found the Monitor's Row in the DB - We need to retrieve the info **** //
+                    repeat_flag = false;
+                    csl_monitor_record *monitor_row = csl_ReturnMonitorRows(G_db_connection, result);
+                    G_monitor_table.monitor_id = monitor_row[0].monitor_id;
+                    G_monitor_table.monitor_sync = (short) monitor_row[0].monitor_sync;
+
+                    if (G_monitor_table.monitor_sync == 1 || db_sync_just_launched == true)
+                    {
+                        // TODO - Ensure that monitor_sync == 1 when db_just_launched_flag == true
+
+                        // **** Perform Initiation (or re-initiation) of the Monitor's tables **** //
+                        return_flag = monitorConfigUpdate();
+                        if (return_flag != CS_SUCCESS)
+                            continue;
+
+                        // **** Update the DB to let it know that we have read the config info **** //
+                        printf("\t<%s> Obtained Config Data from Monitor_Sync\n\n", __PRETTY_FUNCTION__);
+
+                        // **** Set monitor_sync alert value back to zero **** //
+                        char query[SIZE_CS_SQL_COMMAND];
+                        memset(query, NULL_BINARY, SIZE_CS_SQL_COMMAND);
+                        sprintf(query, "Update %s.%s Set Monitor_Sync = 0 where monitor_id = %llu",
+                                CS_SQL_MONITOR_SCHEMA, CS_SQL_MONITOR_VIEW, G_monitor_table.monitor_id);
+                        int query_flag = csl_UpdateDB(G_db_connection, query);
+                        if (query_flag != CS_SUCCESS)
+                        {
+                            return_flag = CS_ERROR_DB_UPDATE;
+                            printf("\t<%s> Error: Failed to reset the Monitor_Sync flag for [%s]\n",
+                                   __PRETTY_FUNCTION__, G_monitor_table.comm_params.monitor_mac_address);
+                        }
+                    }
+                    free(monitor_row);
+                    break;
+
+                default:
+                    // There should only be one row in the Monitor View in the DB ... Corrupted DB
+                    printf("\t<%s> Error: too many rows [%d] in the database for monitor_identifier [%s]\n",
+                           __PRETTY_FUNCTION__, returned_rows, G_monitor_table.comm_params.monitor_mac_address);
+                    return_flag = CS_CORRUPTED_DB;
+                    repeat_flag = false;
+                    break;
+            }
+        }
+    } while (repeat_flag == true);
+
+    csl_mysql_free_result(result);
+    return return_flag;
+}
+
+int monitorConfigUpdate()
+{
+    int         return_flag = CS_SUCCESS;
+    char        mysql_query[SIZE_CS_SQL_COMMAND];
+    MYSQL_RES   *result     = NULL;
+
+    /********************************************
+     * Initialize the Monitor's important tables
+     *      The Status Quo Table            - Keeps track of the latest scan data for each device
+     *      The Device Table                - Keeps track of the devices the monitor is monitoring
+     *      The Device "bad actor" Table    - Keeps track of the unauthorized devices attempting to connect
+     ********************************************/
+
+    // **** Initialize G_status_quo_table to all 0s - indicating no current devices and scans ****
+    for (int i = 0; i < MAX_DEVICES; i++)
+    {
+        for (int j = 0; j < MAX_ELEMENTS; j++)
+        {
+            memset(G_status_quo_table[i][j].element_identifier, NULL_BINARY, SIZE_ELEMENT_IDENTIFIER);
+            G_status_quo_table[i][j].element_attributes   = 0;
+//            memset(G_status_quo_table[i][j].element_name, NULL_BINARY, SIZE_ELEMENT_NAME);
+//            strcpy(G_status_quo_table[i][j].element_name,DEFAULT_ELEMENT_NAME);
+            memset(G_status_quo_table[i][j].scan_value, NULL_BINARY, SIZE_HASH_ELEMENT);
+            G_status_quo_table[i][j].alert_code           = 0;
+        }
+    }
+
+//    printf("\t<%s>  we are true up to here ... and then?\n",__PRETTY_FUNCTION__);
+    // **** Initialize G_device_table to all 0s - indicating no active devices ****
+    for (short i = 0; i < MAX_DEVICES; i++)
+    {
+        G_device_table[i].device_id             = 0L;
+        memset(G_device_table[i].device_mac_address, NULL_BINARY, SIZE_MAC_ADDRESS);
+        memcpy(G_device_table[i].device_mac_address, DEFAULT_MAC_ADDRESS, strlen(DEFAULT_MAC_ADDRESS));
+        memset(G_device_table[i].device_identifier, NULL_BINARY, SIZE_DEVICE_IDENTIFIER);   // 0 out the byte array
+        memcpy(G_device_table[i].device_identifier, DEFAULT_MAC_ADDRESS, strlen(DEFAULT_MAC_ADDRESS));
+        G_device_table[i].status_element_ctr    = 0;
+        G_device_table[i].cs_standard_flag      = true;
+        G_device_table[i].last_heartbeat        = 0L;
+        G_device_table[i].probe_id              = csl_AssignProbeID(DEFAULT_MONITOR_ID, 1);
+        G_device_table[i].device_index          = i;
+    }
+//    printf("\t<%s> we are true up to here ... and then?\n",__PRETTY_FUNCTION__);
+
+    deviceBadActorTableInitialize();
+
+    // **** Initialize the crytica_standard date field in the database ****
+    result      = NULL;
+    sprintf(mysql_query,
+            "Update %s.%s "
+            "set crytica_standard_date = '%s' "
+            "where Monitor_id = %llu",
+            CS_SQL_MONITOR_SCHEMA, CS_SQL_MONITOR_DEVICE_VIEW,
+            DEFAULT_DATE, G_monitor_table.monitor_id);
+    if (csl_UpdateDB(G_db_connection, mysql_query) != CS_SUCCESS)
+    {
+        printf("\t<%s>, Failed to initialize the Crytica Standard Date in the %s.%s\n",
+               __PRETTY_FUNCTION__ , CS_SQL_MONITOR_SCHEMA, CS_SQL_MONITOR_DEVICE_VIEW);
+        return_flag = CS_ERROR_DB_UPDATE;
+    }
+
+    // **** Obtain Monitor's Assigned Devices Data from the Database ****
+    result      = NULL;
+    sprintf(mysql_query,
+            "Select Distinct Device_ID, Device_Identifier from %s.%s "
+            "where Monitor_id = %llu order by Device_ID asc",
+            CS_SQL_MONITOR_SCHEMA, CS_SQL_MONITOR_DEVICE_VIEW,
+            G_monitor_table.monitor_id);
+    result = csl_QueryDB (G_db_connection, mysql_query);
+    if (result != NULL)
+    {
+        int return_rows = mysql_num_rows(result);
+        csl_monitor_device_record *monitor_device_row = csl_ReturnMonitorDeviceRows(G_db_connection, result);
+        for (unsigned int i = 0; i < return_rows; i++)
+        {
+            G_device_table[i].device_id   = monitor_device_row[i].device_id;
+            G_device_table[i].probe_id    = csl_AssignProbeID(G_monitor_table.monitor_id, i);
+            memset(G_device_table[i].device_identifier, NULL_BINARY, SIZE_DEVICE_IDENTIFIER);
+            memcpy(G_device_table[i].device_identifier, monitor_device_row[i].device_identifier, SIZE_DEVICE_IDENTIFIER);
+            printf("\t<%s> Supported device_id [%llu] has device_identifier [%s] & probe_id [%0.4f]\n",
+                   __PRETTY_FUNCTION__ , G_device_table[i].device_id,
+                   G_device_table[i].device_identifier, G_device_table[i].probe_id);
+//            printf("Device [%d] device_id [%llu] device_identifier [%s] is %s\n", i , G_device_table[i].device_id,
+//                   G_device_table[i].cs_standard_flag ? "true" : "false", G_device_table[i].device_identifier);
+            G_monitor_table.device_ctr++;
+        }
+        free(monitor_device_row);
+    }
+
+    // **** Initialize the Crytica Standard Table and Element Added Names Table ****
+    result      = NULL;
+    sprintf(mysql_query,
+            "Truncate Table %s.%s",
+            CS_SQL_MONITOR_SCHEMA, CS_SQL_STANDARD_TABLE);
+    if (csl_UpdateDB (G_db_connection, mysql_query) != CS_SUCCESS)
+    {
+        printf("\t<%s> **** WARNING: Failed to truncate %s.%s\n",
+               __PRETTY_FUNCTION__ , CS_SQL_MONITOR_SCHEMA, CS_SQL_STANDARD_TABLE);
+        return_flag = CS_ERROR_DB_UPDATE;
+    }
+
+    result      = NULL;
+    sprintf(mysql_query,
+            "Truncate Table %s.%s",
+            CS_SQL_MONITOR_SCHEMA, CS_SQL_ELEMENT_ADDED_NAMES_TABLE);
+    if (csl_UpdateDB (G_db_connection, mysql_query) != CS_SUCCESS)
+    {
+        printf("\t<%s> **** WARNING: Failed to truncate %s.%s\n",
+               __PRETTY_FUNCTION__, CS_SQL_MONITOR_SCHEMA, CS_SQL_ELEMENT_ADDED_NAMES_TABLE);
+        return_flag = CS_ERROR_DB_UPDATE;
+    }
+
+    return return_flag;
+}
+
+/************************************************
+ * int monitorInitialize()
  *  @param  None
  *
  *  @brief  When the monitor first launches, there are many start-up tasks
@@ -1529,11 +1787,11 @@ int     messageUnknownProcess(int message_type, short device_id)
  *                  - Device Table
  *                  - Status Quo Table
  *
- *  @return true on success, false on failure
+ *  @return CS_SUCCESS or error code
  ************************************************/
-bool monitorInitialize()
+int monitorInitialize()
 {
-    bool    return_flag = true;
+    int   return_flag = CS_SUCCESS;
 
     /********************************************
      * Set up the monitor identity and communication fields
@@ -1618,8 +1876,9 @@ bool monitorInitialize()
 //            if (strncmp(ip_address_internal, IP_PREFIX, SIZE_IP_PREFIX) == 0)
             if (strncmp(ip_address_internal, LOCAL_HOST_IP, SIZE_LOCAL_HOST_IP) != 0)
             {
-                printf("\t<%s> DEBUG: %s\'s Internal IP address found: <%s>\n\n",
-                       __PRETTY_FUNCTION__, my_host_name, ip_address_internal);
+                // **** Internal IP Address has been successfully determined ****
+//                printf("\t<%s> %s\'s Internal IP address found: <%s>\n\n",
+//                       __PRETTY_FUNCTION__, my_host_name, ip_address_internal);
                 break;
             }
         }
@@ -1660,54 +1919,18 @@ bool monitorInitialize()
     sprintf(G_monitor_table.comm_params.scan_address,"%d", scan_port);
     strcpy(G_monitor_table.comm_params.public_cert_file_name, G_zmq_comms_t->public_cert_file_name);
 
-//    FILE* testLogFile = fopen ("Exceptions.txt" , "w");
+    printf("\t<%s> Monitor MAC Address is: %s\n",
+           __PRETTY_FUNCTION__, G_monitor_table.comm_params.monitor_mac_address);
 
-    /********************************************
-     * Initialize the Monitor's important tables
-     *      The Status Quo Table            - Keeps track of the latest scan data for each device
-     *      The Device Table                - Keeps track of the devices the monitor is monitoring
-     *      The Device "bad actor" Table    - Keeps track of the unauthorized devices attempting to connect
-     ********************************************/
-    // **** Initialize G_status_quo_table to all 0s - indicating no current devices and scans ****
-    for (int i = 0; i < MAX_DEVICES; i++)
-    {
-        for (int j = 0; j < MAX_ELEMENTS; j++)
-        {
-            memset(G_status_quo_table[i][j].element_identifier, NULL_BINARY, SIZE_ELEMENT_IDENTIFIER);
-            G_status_quo_table[i][j].element_attributes   = 0;
-//            memset(G_status_quo_table[i][j].element_name, NULL_BINARY, SIZE_ELEMENT_NAME);
-//            strcpy(G_status_quo_table[i][j].element_name,DEFAULT_ELEMENT_NAME);
-            memset(G_status_quo_table[i][j].scan_value, NULL_BINARY, SIZE_HASH_ELEMENT);
-            G_status_quo_table[i][j].alert_code           = 0;
-        }
-    }
-
-//    printf("\t<%s>  we are true up to here ... and then?\n",__PRETTY_FUNCTION__);
-    // **** Initialize G_device_table to all 0s - indicating no active devices ****
-    for (short i = 0; i < MAX_DEVICES; i++)
-    {
-        G_device_table[i].device_id             = 0L;
-        memset(G_device_table[i].device_mac_address, NULL_BINARY, SIZE_MAC_ADDRESS);
-        memcpy(G_device_table[i].device_mac_address, DEFAULT_MAC_ADDRESS, strlen(DEFAULT_MAC_ADDRESS));
-        memset(G_device_table[i].device_identifier, NULL_BINARY, SIZE_DEVICE_IDENTIFIER);   // 0 out the byte array
-        memcpy(G_device_table[i].device_identifier, DEFAULT_MAC_ADDRESS, strlen(DEFAULT_MAC_ADDRESS));
-        G_device_table[i].status_element_ctr    = 0;
-        G_device_table[i].cs_standard_flag      = true;
-        G_device_table[i].last_heartbeat        = 0L;
-        G_device_table[i].probe_id              = csl_AssignProbeID(DEFAULT_MONITOR_ID, 1);
-        G_device_table[i].device_index          = i;
-    }
-//    printf("\t<%s> we are true up to here ... and then?\n",__PRETTY_FUNCTION__);
-
-    deviceBadActorTableInitialize();
+//    FILE* testLogFile = fopen ("Exceptions.txt" , "w");   // TO BE REMOVED - vestigial code
 
     /********************************************
      * Connect to the MySQL Database
      ********************************************/
     // **** Setup the MySQL parameters and declarations ****
     csl_mysql_connection_params connect_db_params;
-    connect_db_params.dbPort           = DB_PORT;
-    connect_db_params.dbHost           = "localhost";
+    connect_db_params.dbPort           = CS_SQL_DB_PORT;
+    connect_db_params.dbHost           = CS_SQL_LOCAL_DB;
     connect_db_params.dbServer         = NULL;
     connect_db_params.dbName           = CS_SQL_MONITOR_SCHEMA;
     connect_db_params.dbUser           = DB_USER;
@@ -1719,7 +1942,7 @@ bool monitorInitialize()
     {
         // todo - issue error message
         printf("\t<%s>**** ERROR: Monitor Failed to Connect to its MySQL Database ****\n",__PRETTY_FUNCTION__ );
-        return false;
+        return CS_ERROR_DB_CONNECTION;
     }
 
     // **** Connect to the Monitor Schema ****
@@ -1729,137 +1952,46 @@ bool monitorInitialize()
     if (csl_UpdateDB(G_db_connection, database_query) != CS_SUCCESS)
     {
         // todo - issue error message
-        return false;
+        return CS_CORRUPTED_DB;
     }
 
-    // **** Obtain Monitor Data from the Database ****
-    MYSQL_RES *result      = NULL;
-    char mysql_query[SIZE_CS_SQL_COMMAND];
 
-    memset(mysql_query, NULL_BINARY, SIZE_CS_SQL_COMMAND);
-    sprintf(mysql_query,
-            "Select Monitor_ID from %s.%s "
-            "where Monitor_Identifier = '%s'",
-            CS_SQL_MONITOR_SCHEMA, CS_SQL_MONITOR_VIEW,
-            G_monitor_table.comm_params.monitor_mac_address);
-    printf("\t<%s> Monitor MAC Address is: %s\n", __PRETTY_FUNCTION__, G_monitor_table.comm_params.monitor_mac_address);
-    result = csl_QueryDB (G_db_connection, mysql_query);
-    if (result != NULL)
+    /********************************************
+     * Launch the DB_SYNC program
+     * Wait for, and then check, the Monitor Configuration Values
+     ********************************************/
+
+    // **** Start up the db_sync program ****
+    int system_call = system ("/usr/crytica/db_sync /usr/crytica/cfgfile-production.txt > /home/kerry/db_sync.log &");
+//    int system_call = system (DB_SYNC_INVOKE);
+    if (system_call < 0)
     {
-        unsigned int returned_rows = mysql_num_rows(result);
-        switch (returned_rows)
-        {
-            case 0:
-                printf("\t<%s> Error: no rows found in the database for monitor_identifier [%s]\n",
-                       __PRETTY_FUNCTION__, G_monitor_table.comm_params.monitor_mac_address);
-                break;
-
-            case 1:
-                break;
-
-            default:
-                printf("\t<%s> Error: too many rows [%d] in the database for monitor_identifier [%s]\n",
-                   __PRETTY_FUNCTION__, returned_rows, G_monitor_table.comm_params.monitor_mac_address);
-                break;
-        }
-        csl_monitor_record *monitor_row = csl_ReturnMonitorRows(G_db_connection, result);
-        G_monitor_table.monitor_id = monitor_row[0].monitor_id;
-        free(monitor_row);
+        printf("\t<%s> FAILED to Invoke DB_SYNC with [%s]\n",__PRETTY_FUNCTION__, DB_SYNC_INVOKE);
+        return CS_ERROR;
     }
-    else
+
+    // TODO - Check to see that the program launched and is running
+    char line[SIZE_LINUX_COMMAND];
+    FILE *command = popen("pidof db_sync","r");
+
+    fgets(line,SIZE_LINUX_COMMAND,command);
+
+    G_pid_db_sync = strtoul(line,NULL,10);
+    pclose(command);
+    if (G_pid_db_sync < 1)
     {
-        return_flag = false;
-        if (result == NULL)
-        {
-            printf("**** ERROR ****\n");
-            printf("     Monitor: [%s] [%s] is not configured in the database\n\n",
-                   G_monitor_table.comm_params.monitor_mac_address,
-                   G_monitor_table.comm_params.monitor_hostname);
-            // todo - issue error message monitor not in the database
-        }
-        else
-        {
-            printf("**** ERROR ****\n");
-            printf("     Database Error [%d] Looking up Monitor: [%s] [%s]\n\n",
-                   return_flag,
-                   G_monitor_table.comm_params.monitor_mac_address,
-                   G_monitor_table.comm_params.monitor_hostname);
-            // todo - issue error message mysql error
-        }
+        printf("\t<%s> FAILED to find DB_SYNC PID from [%s]\n",__PRETTY_FUNCTION__, DB_SYNC_INVOKE);
+        return CS_ERROR;
     }
-    csl_mysql_free_result(result);
+    printf("\t<%s> Successfully launched DB_SYNC with PID [%d]\n\n",__PRETTY_FUNCTION__, G_pid_db_sync);
 
-    // **** Initialize the crytica_standard date field in the database ****
-    result      = NULL;
-    sprintf(mysql_query,
-            "Update %s.%s "
-            "set crytica_standard_date = '%s' "
-            "where Monitor_id = %llu",
-            CS_SQL_MONITOR_SCHEMA, CS_SQL_MONITOR_DEVICE_VIEW,
-            DEFAULT_DATE, G_monitor_table.monitor_id);
-    if (csl_UpdateDB(G_db_connection, mysql_query) != CS_SUCCESS)
-    {
-        printf("\t<%s>, Failed to initialize the Crytica Standard Date in the %s.%s\n",
-               __PRETTY_FUNCTION__ , CS_SQL_MONITOR_SCHEMA, CS_SQL_MONITOR_DEVICE_VIEW);
-    }
-
-    // **** Obtain Monitor's Assigned Devices Data from the Database ****
-    result      = NULL;
-    sprintf(mysql_query,
-            "Select Distinct Device_ID, Device_Identifier from %s.%s "
-            "where Monitor_id = %llu order by Device_ID asc",
-            CS_SQL_MONITOR_SCHEMA, CS_SQL_MONITOR_DEVICE_VIEW,
-            G_monitor_table.monitor_id);
-    result = csl_QueryDB (G_db_connection, mysql_query);
-    if (result != NULL)
-    {
-        int return_rows = mysql_num_rows(result);
-        csl_monitor_device_record *monitor_device_row = csl_ReturnMonitorDeviceRows(G_db_connection, result);
-        for (unsigned int i = 0; i < return_rows; i++)
-        {
-            G_device_table[i].device_id   = monitor_device_row[i].device_id;
-            G_device_table[i].probe_id    = csl_AssignProbeID(G_monitor_table.monitor_id, i);
-                    memset(G_device_table[i].device_identifier, NULL_BINARY, SIZE_DEVICE_IDENTIFIER);
-            memcpy(G_device_table[i].device_identifier, monitor_device_row[i].device_identifier, SIZE_DEVICE_IDENTIFIER);
-            printf("\t<%s> Supported device_id [%llu] has device_identifier [%s] & probe_id [%0.4f]\n",
-                   __PRETTY_FUNCTION__ , G_device_table[i].device_id,
-                   G_device_table[i].device_identifier, G_device_table[i].probe_id);
-//            printf("Device [%d] device_id [%llu] device_identifier [%s] is %s\n", i , G_device_table[i].device_id,
-//                   G_device_table[i].cs_standard_flag ? "true" : "false", G_device_table[i].device_identifier);
-            G_monitor_table.device_ctr++;
-        }
-        free(monitor_device_row);
-    }
-
-    // **** Initialize the Crytica Standard Table and Element Added Names Table ****
-    result      = NULL;
-    sprintf(mysql_query,
-            "Truncate Table %s.%s",
-            CS_SQL_MONITOR_SCHEMA, CS_SQL_STANDARD_TABLE);
-    if (csl_UpdateDB (G_db_connection, mysql_query) != CS_SUCCESS)
-    {
-        printf("\t<%s> **** WARNING: Failed to truncate %s.%s\n",
-                   __PRETTY_FUNCTION__ , CS_SQL_MONITOR_SCHEMA, CS_SQL_STANDARD_TABLE);
-        return_flag = false;
-    }
-
-    result      = NULL;
-    sprintf(mysql_query,
-            "Truncate Table %s.%s",
-            CS_SQL_MONITOR_SCHEMA, CS_SQL_ELEMENT_ADDED_NAMES_TABLE);
-    if (csl_UpdateDB (G_db_connection, mysql_query) != CS_SUCCESS)
-    {
-        printf("\t<%s> **** WARNING: Failed to truncate %s.%s\n",
-               __PRETTY_FUNCTION__ , CS_SQL_MONITOR_SCHEMA, CS_SQL_ELEMENT_ADDED_NAMES_TABLE);
-        return_flag = false;
-    }
+    // **** Obtain Monitor Config Data from the Database ****
+    bool    db_sync_just_launched = true;
+    return_flag = monitorConfigDBQuery (db_sync_just_launched);
 
     /********************************************
      * Wrap up the initialization
      ********************************************/
-    csl_mysql_free_result(result);
-//    if (return_flag == false)
-//        return return_flag;
 
     return return_flag;
 }
@@ -1881,6 +2013,18 @@ bool monitorInitialize()
 bool    monitorShutDown()
 {
     bool return_flag = true;
+
+    // **** Kill the DB_SYNC process **** //
+    char command[SIZE_LINUX_COMMAND];
+    sprintf(command, "kill -9 %d", G_pid_db_sync);
+    if (system(command) != 0)
+    {
+        printf("\n\t<%s> Failed to kill db_sync process [%d]\n\n", __PRETTY_FUNCTION__, G_pid_db_sync);
+    }
+    else
+    {
+        printf("\n\t<%s> Successfully killed db_sync process [%d]\n\n", __PRETTY_FUNCTION__, G_pid_db_sync);
+    }
 
     // **** Disconnect from the database ****
     csl_DisconnectFromDB(G_db_connection);    // Note: This is a void function, so indicator of success or failure

@@ -274,6 +274,9 @@ csl_monitor_record  *csl_ReturnMonitorRows(MYSQL *db_connection, MYSQL_RES *resu
     while ((row = mysql_fetch_row(result)))
     {
         return_monitor[row_ctr].monitor_id = strtoll(row[0], NULL, BASE_TEN);
+        strcpy(return_monitor[row_ctr].monitor_name, row[1]);
+        strcpy(return_monitor[row_ctr].monitor_identifier, row[2]);
+        return_monitor[row_ctr].monitor_sync = (short) strtol(row[3], NULL, BASE_TEN);
         row_ctr++;
     }
     if (num_rows != row_ctr)
