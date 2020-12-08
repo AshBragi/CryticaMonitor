@@ -413,7 +413,7 @@ bool alertOnDevice (char *identifier_string, short alert_type)
  //       perhaps it should be this ??   G_current_cs_message.message_header.to_address.device_ip_address);
     strcpy(alert_record.device_to_info, G_monitor_table.comm_params.monitor_hostname);
 
-    // Get device data from current_message
+    // Get device data from current_message ...
     if (memcmp(
             G_current_cs_message.message_header.from_address.device_identifier,
             identifier_string, SIZE_DEVICE_IDENTIFIER) != 0)
